@@ -31,6 +31,8 @@ internal sealed class Snowfall
     public static FlakeShape Shape = FlakeShape.Mixed;
     /// <summary>Snow density multiplier (lower on battery / battery saver).</summary>
     public static float DensityK = 1f;
+    /// <summary>Extra density for this instance (the small settings preview looks empty otherwise).</summary>
+    public float LocalK = 1f;
     public static FlakeSize SizeSetting = FlakeSize.Medium;
 
     private readonly Random _rng = new();
@@ -74,7 +76,7 @@ internal sealed class Snowfall
     private int TargetCount(Intensity intensity)
     {
         float logicalArea = _width * _height / (_scale * _scale);
-        int n = (int)(Params(intensity).density * DensityK * logicalArea / (1920f * 1080f));
+        int n = (int)(Params(intensity).density * DensityK * LocalK * logicalArea / (1920f * 1080f));
         return Math.Clamp(n, 0, MaxFlakes);
     }
 

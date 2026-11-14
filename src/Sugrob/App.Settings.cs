@@ -149,6 +149,7 @@ internal sealed partial class App
             {
                 var b = new RECT { Left = PvX, Top = PvY, Right = PvX + _pvW, Bottom = PvY + _pvH };
                 _preview = new Overlay(_gpu, b, _pvScale, _pvHost, _pvW, _pvH);
+                _preview.Snow.LocalK = 3.5f;
                 _preview.Snow.Prefill(_settings.Intensity, _wind);
                 _pvWin = new Drift(new IntPtr(-777001), DriftKind.Window);
                 _pvGround = new Drift(new IntPtr(-777002), DriftKind.Ground);

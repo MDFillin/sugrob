@@ -59,7 +59,7 @@ internal sealed class NewYear : IDisposable
             if (t < TestCountdown) { _phase = Phase.Countdown; _secondsLeft = TestCountdown - t; }
             else if (t < TestCountdown + TestShow) { _phase = Phase.Fireworks; _sinceMidnight = t - TestCountdown; }
             else _testStart = -1;
-            _year = DateTime.Now.Year + (DateTime.Now.Month == 12 ? 1 : 0);
+            _year = DateTime.Now.Year + (DateTime.Now.Month >= 7 ? 1 : 0); // the coming year
             if (_phase != Phase.None) return;
         }
         if (!enabled) return;
@@ -86,7 +86,7 @@ internal sealed class NewYear : IDisposable
         {
             float show = _testStart >= 0 ? TestShow : RealShow;
             // an opening salvo, then a steady show that thins out at the end
-            float rate = _sinceMidnight < 4 ? 6f : _sinceMidnight > show - 15 ? 1f : 2.2f;
+            float rate = _sinceMidnight < 4 ? 7f : _sinceMidnight > show - 15 ? 1.4f : 3f;
             _launchAcc += dt * rate * Math.Min(3, overlays.Count);
             while (_launchAcc >= 1) { _launchAcc -= 1; Launch(overlays); }
         }
@@ -111,7 +111,7 @@ internal sealed class NewYear : IDisposable
             {
                 float k = MathF.Exp(-s.Drag * dt);
                 s.V *= k;
-                s.V.Y += g * dt * (s.Size * 0.5f + 0.5f);
+                s.V.Y += g * 0.6f * dt;
                 s.P += s.V * dt;
             }
             if (s.Life > 0) _sp[w++] = s;
@@ -154,32 +154,32 @@ internal sealed class NewYear : IDisposable
         {
             case 0: // peony: a full sphere
             case 1:
-                for (int i = 0; i < 110; i++)
+                for (int i = 0; i < 160; i++)
                 {
-                    var d = RandomDir() * (150f + 120f * _rnd.NextSingle()) * s;
-                    Emit(r.P, d, 1.6f + 0.6f * _rnd.NextSingle(), 3.2f * s, 1.6f, 0, i % 3 == 0 ? c2 : r.C);
+                    var d = RandomDir() * (380f + 180f * _rnd.NextSingle()) * s;
+                    Emit(r.P, d, 1.9f + 0.7f * _rnd.NextSingle(), 3.4f * s, 1.5f, 0, i % 3 == 0 ? c2 : r.C);
                 }
                 break;
             case 2: // ring
             {
                 float tilt = 0.35f + 0.5f * _rnd.NextSingle(), rot = _rnd.NextSingle() * MathF.PI;
-                for (int i = 0; i < 70; i++)
+                for (int i = 0; i < 100; i++)
                 {
-                    float a = i / 70f * MathF.Tau;
+                    float a = i / 100f * MathF.Tau;
                     var d = new Vector2(MathF.Cos(a), MathF.Sin(a) * tilt);
-                    d = Vector2.Transform(d, Matrix3x2.CreateRotation(rot)) * 230f * s;
-                    Emit(r.P, d, 1.8f, 3.4f * s, 1.5f, 0, r.C);
+                    d = Vector2.Transform(d, Matrix3x2.CreateRotation(rot)) * 520f * s;
+                    Emit(r.P, d, 2f, 3.6f * s, 1.5f, 0, r.C);
                 }
-                for (int i = 0; i < 25; i++) Emit(r.P, RandomDir() * 70f * s, 1.2f, 2.8f * s, 1.5f, 0, c2);
+                for (int i = 0; i < 40; i++) Emit(r.P, RandomDir() * 160f * s, 1.4f, 3f * s, 1.5f, 0, c2);
                 break;
             }
             case 3: // willow: slow golden streamers
-                for (int i = 0; i < 90; i++)
-                    Emit(r.P, RandomDir() * (110f + 90f * _rnd.NextSingle()) * s, 3.2f + _rnd.NextSingle(), 2.6f * s, 0.9f, 0.4f, new Color4(1f, 0.78f, 0.35f, 1));
+                for (int i = 0; i < 140; i++)
+                    Emit(r.P, RandomDir() * (260f + 160f * _rnd.NextSingle()) * s, 3.4f + _rnd.NextSingle(), 3f * s, 1.1f, 0.4f, new Color4(1f, 0.78f, 0.35f, 1));
                 break;
             default: // crackle: twinkling glitter
-                for (int i = 0; i < 120; i++)
-                    Emit(r.P, RandomDir() * (100f + 170f * _rnd.NextSingle()) * s, 1.4f + 0.8f * _rnd.NextSingle(), 2.6f * s, 1.7f, 1f, i % 2 == 0 ? new Color4(1, 1, 0.9f, 1) : r.C);
+                for (int i = 0; i < 170; i++)
+                    Emit(r.P, RandomDir() * (260f + 280f * _rnd.NextSingle()) * s, 1.6f + 0.8f * _rnd.NextSingle(), 3f * s, 1.6f, 1f, i % 2 == 0 ? new Color4(1, 1, 0.9f, 1) : r.C);
                 break;
         }
     }
@@ -224,10 +224,10 @@ internal sealed class NewYear : IDisposable
             a = a * a * (3 - 2 * a);
             if (s.Twinkle > 0) a *= 1f - s.Twinkle * 0.8f * (0.5f + 0.5f * MathF.Sin(time * 40f + i * 1.7f));
             if (a < 0.02f) continue;
-            float hz = s.Size * (3.5f + 2f * a);
-            sb.Add(x, y, hz, glow, new Color4(s.C.R * a, s.C.G * a, s.C.B * a, a * 0.25f)); // near-additive glow
+            float hz = s.Size * (7f + 5f * a);
+            sb.Add(x, y, hz, glow, new Color4(s.C.R * a, s.C.G * a, s.C.B * a, a * 0.3f)); // near-additive glow
             float w = 0.35f + 0.65f * a;
-            sb.Add(x, y, s.Size * 0.9f, core, new Color4((s.C.R * 0.5f + 0.5f) * a * w, (s.C.G * 0.5f + 0.5f) * a * w, (s.C.B * 0.5f + 0.5f) * a * w, a));
+            sb.Add(x, y, s.Size * 1.3f, core, new Color4((s.C.R * 0.5f + 0.5f) * a * w, (s.C.G * 0.5f + 0.5f) * a * w, (s.C.B * 0.5f + 0.5f) * a * w, a));
         }
     }
 
