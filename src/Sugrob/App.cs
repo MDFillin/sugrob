@@ -7,9 +7,11 @@ using static Sugrob.Native;
 namespace Sugrob;
 
 /// <summary>Owns the hidden main window, tray icon, hotkeys, overlays and the frame loop.</summary>
-internal sealed class App : IDisposable
+internal sealed partial class App : IDisposable
 {
     private const string MainClass = "Sugrob.Main";
+    internal const string MainClassName = MainClass;
+    internal const uint WM_OPEN_SETTINGS = Native.WM_APP + 8;
 
     // menu command ids
     private const int CmdPause = 1;
@@ -26,10 +28,12 @@ internal sealed class App : IDisposable
     private const int CmdGarlandSize = 140;  // +FlakeSize
     private const int CmdQuiet = 100, CmdShape = 110 /* +FlakeShape */, CmdSize = 120 /* +FlakeSize */;
     private const int CmdExit = 99, CmdUninstall = 98, CmdUpdateCheck = 97, CmdUpdateAuto = 96, CmdUpdateNow = 95;
+    private const int CmdSettings = 94;
 
     // hotkey ids
-    private const int HkPause = 1, HkLeft = 2, HkRight = 3, HkUp = 4, HkDown = 5, HkCalm = 6, HkIntensity = 7;
-    private const int HkSculpt = 8, HkClear = 9, HkTool = 10, HkPlow = 11, HkGarland = 12, HkWallpaper = 13, HkQuiet = 14, HkShape = 15, HkGarlandShape = 16;
+    private const int HkPause = (int)HotkeyAction.Pause, HkLeft = (int)HotkeyAction.WindLeft, HkRight = (int)HotkeyAction.WindRight, HkUp = (int)HotkeyAction.WindUp, HkDown = (int)HotkeyAction.WindDown, HkCalm = (int)HotkeyAction.Calm, HkIntensity = (int)HotkeyAction.Intensity;
+    private const int HkSculpt = (int)HotkeyAction.Sculpt, HkClear = (int)HotkeyAction.Clear, HkTool = (int)HotkeyAction.Tool, HkPlow = (int)HotkeyAction.Plow, HkGarland = (int)HotkeyAction.Garland, HkWallpaper = (int)HotkeyAction.Wallpaper, HkQuiet = (int)HotkeyAction.Quiet, HkShape = (int)HotkeyAction.Shape, HkGarlandShape = (int)HotkeyAction.GarlandShape;
+    private const int HkSettings = (int)HotkeyAction.Settings, HkNewYear = (int)HotkeyAction.NewYear;
 
     private readonly Settings _settings = Settings.Load();
     private readonly List<Overlay> _overlays = new();
@@ -40,6 +44,7 @@ internal sealed class App : IDisposable
     private TrayIcon? _tray;
     private Gpu? _gpu;
     private World _world = new();
+    private readonly NewYear _newYear = new();
     private IntPtr _timer;
 
     private bool _rebuildPending;
@@ -104,6 +109,22 @@ internal sealed class App : IDisposable
                 continue;
             }
 
+            // Windows 11: frames follow the compositor's own clock (vsync of the fastest monitor),
+            // so motion is perfectly even; each monitor still draws only at its own rate (see Frame)
+            if (!_idle && HasCompositorClock)
+            {
+                WaitForCompositorClock(40); // messages that arrive meanwhile are handled at the top of the loop
+                now = _clock.Elapsed.TotalSeconds;
+                if (AnyMonitorDue(now))
+                {
+                    float fdt = (float)Math.Min(now - last, 0.1);
+                    last = now;
+                    Frame(fdt, now);
+                }
+                next = now;
+                continue;
+            }
+
             if (now >= next)
             {
                 float dt = (float)Math.Min(now - last, 0.1);
@@ -148,6 +169,8 @@ internal sealed class App : IDisposable
             UpdatePlows(dt, now);
             DistributeSpill();
             _scene.Clumps.Update(dt, _overlays, _virtualBottom);
+            _newYear.Update(dt, now, _settings.NewYear, _overlays);
+            _scene.NewYear = _newYear;
             _scene.World = _world;
             _scene.Garland = _settings.Garland;
             _scene.Time = _time;
@@ -164,6 +187,7 @@ internal sealed class App : IDisposable
 
                 long a = Stopwatch.GetTimestamp();
                 o.Quiet = _settings.QuietOverMaximized && _world.QuietRegion(o.Bounds, o.Allowed);
+                _world.ExcludedRegion(o.Bounds, o.Blocked);
                 o.Snow.Update(odt, _time, _settings.Intensity, _wind, o.Segs, o.ShowFlakes);
                 long b = Stopwatch.GetTimestamp();
                 o.Render(_gpu!, now, _scene);
@@ -176,10 +200,11 @@ internal sealed class App : IDisposable
                 if (_wall.Broken) _wall.Build(_gpu!, _overlays, _settings.Wallpaper); // Explorer restarted
                 else _wall.Render(_gpu!, _time, _world);
             }
+            RenderPreview(dt, now);
             _gpu!.Comp.Commit();
             if (_profile) Profile(t1 - t0, tSim, tRender, now);
 
-            bool idle = _scene.Clumps.Count == 0 && _scene.Plows.Count == 0 && !_wall.Active && !_sculpt;
+            bool idle = _scene.Clumps.Count == 0 && _scene.Plows.Count == 0 && !_wall.Active && !_sculpt && _pvHost == IntPtr.Zero && !_newYear.Active;
             foreach (var o in _overlays) idle &= !o.ShowFlakes && o.Segs.Count == 0;
             _idle = idle;
         }
@@ -356,6 +381,13 @@ internal sealed class App : IDisposable
         if (!on) _balls.Input(_cursor, Vector2.Zero, false, false, true, 0, _world, _overlays); // drop what's held
         Overlay.SetInteractive(_overlays, on);
         UpdateTray();
+    }
+
+    private bool AnyMonitorDue(double now)
+    {
+        foreach (var o in _overlays)
+            if (o.LastRender < 0 || now - o.LastRender >= 0.85 / TargetFps(o)) return true;
+        return false;
     }
 
     /// <summary>
@@ -553,20 +585,26 @@ internal sealed class App : IDisposable
     private long _pScan, _pSim, _pRender;
     private int _pFrames;
     private double _pStart;
+    private long _pAllocStart;
+    private int _pGcStart;
 
     private void Profile(long scan, long sim, long render, double now)
     {
         _pScan += scan; _pSim += sim; _pRender += render; _pFrames++;
         if (now - _pStart < 5) return;
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - _pAllocStart;
+        int gcs = GC.CollectionCount(0) - _pGcStart;
         double ms(long t) => t * 1000.0 / Stopwatch.Frequency / Math.Max(1, _pFrames);
-        var line = $"[{DateTime.Now:T}] frames={_pFrames} scan={ms(_pScan):F3}ms sim={ms(_pSim):F3}ms render={ms(_pRender):F3}ms " +
-                   $"(drifts={ms(Overlay.PDrifts):F3} sprites={ms(Overlay.PSprites):F3} endDraw={ms(Overlay.PEnd):F3} present={ms(Overlay.PPresent):F3}) n={_world.Drifts.Count()}\n";
+        var line = $"[{DateTime.Now:T}] frames={_pFrames} alloc/frame={allocated / Math.Max(1, _pFrames)}B gc0={gcs} scan={ms(_pScan):F3}ms sim={ms(_pSim):F3}ms render={ms(_pRender):F3}ms " +
+                   $"(drifts={ms(Overlay.PDrifts):F3} sprites={ms(Overlay.PSprites):F3} endDraw={ms(Overlay.PEnd):F3} present={ms(Overlay.PPresent):F3}) n={_world.Drifts.Count()} preview={(_preview != null ? _preview.Segs.Count + "segs" : "off")} newyear={_newYear.Active}\n";
         Overlay.PDrifts = Overlay.PSprites = Overlay.PEnd = Overlay.PPresent = 0;
         foreach (var o in _overlays)
-            line += $"   mon {o.Bounds.Left},{o.Bounds.Top} {o.RefreshHz}Hz fps={o.RenderCount / Math.Max(0.001, now - _pStart):F0} quiet={o.Quiet} allowed=[{string.Join("; ", o.Allowed.Select(r => $"{r.Left},{r.Top},{r.Right},{r.Bottom}"))}] clumps={_scene.Clumps.Count}\n";
+            line += $"   mon {o.Bounds.Left},{o.Bounds.Top} {o.RefreshHz}Hz fps={o.RenderCount / Math.Max(0.001, now - _pStart):F0} quiet={o.Quiet} allowed=[{string.Join("; ", o.Allowed.Select(r => $"{r.Left},{r.Top},{r.Right},{r.Bottom}"))}] blocked={o.Blocked.Count} clumps={_scene.Clumps.Count}\n";
         try { File.AppendAllText(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Sugrob", "perf.log"), line); } catch { }
         _pScan = _pSim = _pRender = 0; _pFrames = 0; _pStart = now;
         foreach (var o in _overlays) o.RenderCount = 0;
+        _pAllocStart = GC.GetAllocatedBytesForCurrentThread();
+        _pGcStart = GC.CollectionCount(0);
     }
 
     /// <summary>Snow that left drifts (window closed, shaken, plow, ...) falls as soft clumps.</summary>
@@ -624,6 +662,7 @@ internal sealed class App : IDisposable
         }
         _virtualBottom = _overlays.Count > 0 ? _overlays.Max(o => o.Bounds.Bottom) : 10000;
         _world.OverlaysChanged();
+        _world.SetExcluded(_settings.ExcludedApps);
         if (_sculpt) Overlay.SetInteractive(_overlays, true);
         if (_settings.Wallpaper != WallpaperKind.Off) _wall.Build(_gpu, _overlays, _settings.Wallpaper);
     }
@@ -633,6 +672,7 @@ internal sealed class App : IDisposable
         _wall.Dispose();
         foreach (var o in _overlays) o.Dispose();
         _overlays.Clear();
+        DropPreviewResources();
         _world.Dispose(); // drift geometries belong to the old D2D factory
         _world = new World();
         _scene.Plows.Clear();
@@ -715,26 +755,14 @@ internal sealed class App : IDisposable
         WTSRegisterSessionNotification(_hwnd, 0 /* NOTIFY_FOR_THIS_SESSION */);
     }
 
-    private void RegisterHotkeys()
+    /// <summary>(Re)registers the user's hotkeys; warns once about combos taken by other programs.</summary>
+    public List<string> RegisterHotkeys(bool warn = true)
     {
-        const uint m = MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT;
-        RegisterHotKey(_hwnd, HkPause, m, 'S');
-        RegisterHotKey(_hwnd, HkIntensity, m, 'W');
-        RegisterHotKey(_hwnd, HkCalm, m, VK_SPACE);
-        RegisterHotKey(_hwnd, HkSculpt, m, 'B');
-        RegisterHotKey(_hwnd, HkClear, m, 'C');
-        RegisterHotKey(_hwnd, HkTool, m, 'T');
-        RegisterHotKey(_hwnd, HkPlow, m, 'P');
-        RegisterHotKey(_hwnd, HkGarland, m, 'G');
-        RegisterHotKey(_hwnd, HkWallpaper, m, 'L');
-        RegisterHotKey(_hwnd, HkQuiet, m, 'Q');
-        RegisterHotKey(_hwnd, HkShape, m, 'F');
-        RegisterHotKey(_hwnd, HkGarlandShape, m, 'H');
-        const uint mr = MOD_CONTROL | MOD_ALT | MOD_SHIFT; // arrows may repeat
-        RegisterHotKey(_hwnd, HkLeft, mr, VK_LEFT);
-        RegisterHotKey(_hwnd, HkRight, mr, VK_RIGHT);
-        RegisterHotKey(_hwnd, HkUp, mr, VK_UP);
-        RegisterHotKey(_hwnd, HkDown, mr, VK_DOWN);
+        var failed = Hotkeys.RegisterAll(_hwnd, _settings);
+        if (warn && failed.Count > 0)
+            _tray?.ShowBalloon("Sugrob: заняты сочетания клавиш",
+                "Их уже использует другая программа:\n" + string.Join("\n", failed.Take(4)) + "\nПоменять можно в настройках → «Клавиши».");
+        return failed;
     }
 
     private IntPtr MainProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -745,6 +773,15 @@ internal sealed class App : IDisposable
                 int ev = LOWORD(lParam);
                 if (ev == (int)WM_LBUTTONUP) SetPaused(!_settings.Paused);
                 else if (ev == (int)WM_RBUTTONUP || ev == (int)WM_CONTEXTMENU) ShowMenu();
+                return IntPtr.Zero;
+
+            case WM_OPEN_SETTINGS:
+                if (wParam == 1) _newYear.StartTest(_clock.Elapsed.TotalSeconds); // "Sugrob.exe --fireworks"
+                else OpenSettings();
+                return IntPtr.Zero;
+
+            case WM_UI:
+                DrainUi();
                 return IntPtr.Zero;
 
             case WM_HOTKEY:
@@ -786,6 +823,8 @@ internal sealed class App : IDisposable
         switch (id)
         {
             case HkPause: SetPaused(!_settings.Paused); break;
+            case HkSettings: OpenSettings(); break;
+            case HkNewYear: _newYear.StartTest(_clock.Elapsed.TotalSeconds); break;
             case HkIntensity: SetIntensity((Intensity)(((int)_settings.Intensity + 1) % 3)); break;
             case HkCalm: SetWind(0, 0); break;
             case HkLeft: SetWind(_settings.WindX - step, _settings.WindY); break;
@@ -820,13 +859,6 @@ internal sealed class App : IDisposable
     {
         IntPtr menu = CreatePopupMenu();
         IntPtr snowMenu = CreatePopupMenu();
-        IntPtr windMenu = CreatePopupMenu();
-        IntPtr fpsMenu = CreatePopupMenu();
-        IntPtr toolMenu = CreatePopupMenu();
-        IntPtr garlandMenu = CreatePopupMenu();
-        IntPtr plowMenu = CreatePopupMenu();
-        IntPtr wallMenu = CreatePopupMenu();
-        IntPtr shapeMenu = CreatePopupMenu();
         try
         {
             uint Check(bool c) => c ? MF_CHECKED : 0;
@@ -835,85 +867,15 @@ internal sealed class App : IDisposable
             AppendMenu(snowMenu, Check(_settings.Intensity == Intensity.Normal), CmdIntensity + 1, "Ровный");
             AppendMenu(snowMenu, Check(_settings.Intensity == Intensity.Blizzard), CmdIntensity + 2, "Метель");
 
-            float wx = _settings.WindX, wy = _settings.WindY;
-            AppendMenu(windMenu, Check(wx == 0 && wy == 0), CmdWindCalm, "Штиль\tCtrl+Alt+Shift+Пробел");
-            AppendMenu(windMenu, Check(wx == -1 && wy == 0), CmdWindLeft, "← Влево");
-            AppendMenu(windMenu, Check(wx == -2.5f && wy == 0), CmdWindLeftStrong, "⇐ Влево, сильный");
-            AppendMenu(windMenu, Check(wx == 1 && wy == 0), CmdWindRight, "→ Вправо");
-            AppendMenu(windMenu, Check(wx == 2.5f && wy == 0), CmdWindRightStrong, "⇒ Вправо, сильный");
-            AppendMenu(windMenu, MF_SEPARATOR, 0, null);
-            AppendMenu(windMenu, MF_GRAYED, 0, "Ctrl+Alt+Shift+стрелки — направление и сила");
-
-            string rates = string.Join(" и ", _overlays.Select(o => o.RefreshHz).Distinct().OrderByDescending(h => h).Select(h => h + " Гц"));
-            AppendMenu(fpsMenu, Check(_settings.FpsLimit == 0), CmdFpsMonitor, $"Как у монитора ({rates})");
-            AppendMenu(fpsMenu, MF_SEPARATOR, 0, null);
-            AppendMenu(fpsMenu, Check(_settings.FpsLimit == 30), CmdFps30, "30 кадров/с (экономно)");
-            AppendMenu(fpsMenu, Check(_settings.FpsLimit == 60), CmdFps60, "60 кадров/с");
-            AppendMenu(fpsMenu, Check(_settings.FpsLimit == 120), CmdFps120, "120 кадров/с");
-            AppendMenu(fpsMenu, Check(_settings.FpsLimit == 144), CmdFps144, "144 кадра/с");
-
-            AppendMenu(toolMenu, Check(_settings.Tool == Tool.Mitten), CmdToolMitten, "Варежка — аккуратно смахнуть");
-            AppendMenu(toolMenu, Check(_settings.Tool == Tool.Shovel), CmdToolShovel, "Лопата — убрать до конца");
-            AppendMenu(toolMenu, MF_SEPARATOR, 0, null);
-            AppendMenu(toolMenu, MF_GRAYED, 0, "Проведите курсором по сугробу. Ctrl+Alt+Shift+T — сменить");
-
-            AppendMenu(menu, Check(_settings.Paused), CmdPause, "Пауза\tCtrl+Alt+Shift+S");
-            AppendMenu(menu, Check(_sculpt) | (_settings.Paused ? MF_GRAYED : 0), CmdSculpt, "Лепить снежки и снеговиков\tCtrl+Alt+Shift+B");
-            AppendMenu(menu, _settings.Paused ? MF_GRAYED : 0, CmdClear, "Убрать весь снег\tCtrl+Alt+Shift+C");
+            AppendMenu(menu, 0, CmdSettings, "Настройки…" + Hotkeys.Tab(_settings, HotkeyAction.Settings));
+            SetMenuDefaultItem(menu, CmdSettings, 0);
             AppendMenu(menu, MF_SEPARATOR, 0, null);
-            var g = _settings.Garland;
-            AppendMenu(garlandMenu, Check(g == GarlandMode.Off), CmdGarland + 0, "Выключены");
-            AppendMenu(garlandMenu, Check(g == GarlandMode.Steady), CmdGarland + 3, "Горят");
-            AppendMenu(garlandMenu, Check(g == GarlandMode.Blink), CmdGarland + 1, "Мигают");
-            AppendMenu(garlandMenu, Check(g == GarlandMode.Wave), CmdGarland + 2, "Бегут волной");
-            AppendMenu(garlandMenu, Check(g == GarlandMode.Twinkle), CmdGarland + 4, "Мерцают");
-            AppendMenu(garlandMenu, Check(g == GarlandMode.Rainbow), CmdGarland + 5, "Переливаются радугой");
-            AppendMenu(garlandMenu, Check(g == GarlandMode.Chase), CmdGarland + 6, "Бегущий огонёк");
-            AppendMenu(garlandMenu, MF_SEPARATOR, 0, null);
-            var gs = _settings.GarlandShape;
-            AppendMenu(garlandMenu, Check(gs == GarlandShape.Classic), CmdGarlandShape + 0, "Классические лампочки");
-            AppendMenu(garlandMenu, Check(gs == GarlandShape.Round), CmdGarlandShape + 1, "Шарики");
-            AppendMenu(garlandMenu, Check(gs == GarlandShape.Star), CmdGarlandShape + 2, "Звёздочки");
-            AppendMenu(garlandMenu, Check(gs == GarlandShape.Icicle), CmdGarlandShape + 3, "Сосульки");
-            AppendMenu(garlandMenu, Check(gs == GarlandShape.Retro), CmdGarlandShape + 4, "Ретро-лампы");
-            AppendMenu(garlandMenu, MF_SEPARATOR, 0, null);
-            AppendSizes(garlandMenu, _settings.GarlandSize, CmdGarlandSize, "Лампочки: ");
-            AppendMenu(garlandMenu, MF_SEPARATOR, 0, null);
-            AppendMenu(garlandMenu, MF_GRAYED, 0, "Ctrl+Alt+Shift+G — режим, +H — форма");
-
-            AppendMenu(plowMenu, Check(_settings.Plow == PlowKind.Off), CmdPlow + 0, "Не приезжает");
-            AppendMenu(plowMenu, Check(_settings.Plow == PlowKind.Tractor), CmdPlow + 1, "Трактор");
-            AppendMenu(plowMenu, Check(_settings.Plow == PlowKind.Retro), CmdPlow + 2, "Ретро-трактор");
-            AppendMenu(plowMenu, Check(_settings.Plow == PlowKind.Snowmobile), CmdPlow + 3, "Снегоход");
-            AppendMenu(plowMenu, Check(_settings.Plow == PlowKind.Penguin), CmdPlow + 4, "Пингвин с лопатой");
-            AppendMenu(plowMenu, Check(_settings.Plow == PlowKind.Custom) | (_scene.Image == null ? MF_GRAYED : 0), CmdPlow + 5, "Своя картинка");
-            AppendMenu(plowMenu, MF_SEPARATOR, 0, null);
-            AppendMenu(plowMenu, 0, CmdPlowPick, "Выбрать свою картинку…");
-            AppendMenu(plowMenu, _settings.Paused ? MF_GRAYED : 0, CmdPlowNow, "Вызвать сейчас\tCtrl+Alt+Shift+P");
-
-            AppendMenu(wallMenu, Check(_settings.Wallpaper == WallpaperKind.Off), CmdWall + 0, "Выключены — ваши обои");
-            AppendMenu(wallMenu, Check(_settings.Wallpaper == WallpaperKind.Cabin), CmdWall + 1, "Домик в зимнем лесу");
-            AppendMenu(wallMenu, Check(_settings.Wallpaper == WallpaperKind.Porch), CmdWall + 2, "Крыльцо");
-            AppendMenu(wallMenu, MF_SEPARATOR, 0, null);
-            AppendMenu(wallMenu, MF_GRAYED, 0, "Ctrl+Alt+Shift+L — переключить");
-
-            AppendMenu(shapeMenu, Check(_settings.FlakeShape == FlakeShape.Mixed), CmdShape + 0, "Смешанные");
-            AppendMenu(shapeMenu, Check(_settings.FlakeShape == FlakeShape.Round), CmdShape + 1, "Круглые");
-            AppendMenu(shapeMenu, Check(_settings.FlakeShape == FlakeShape.Crystal), CmdShape + 2, "Кристаллы");
-            AppendMenu(shapeMenu, Check(_settings.FlakeShape == FlakeShape.Star), CmdShape + 3, "Звёздочки");
-            AppendMenu(shapeMenu, Check(_settings.FlakeShape == FlakeShape.Fluffy), CmdShape + 4, "Пушистые хлопья");
-            AppendMenu(shapeMenu, MF_SEPARATOR, 0, null);
-            AppendSizes(shapeMenu, _settings.FlakeSize, CmdSize, "Размер снежинок: ");
-
-            AppendMenu(menu, Check(_settings.QuietOverMaximized), CmdQuiet, "Не мешать в развёрнутых окнах (видео, браузер)\tCtrl+Alt+Shift+Q");
-            AppendMenu(menu, MF_POPUP, shapeMenu, "Снежинки");
-            AppendMenu(menu, MF_POPUP, wallMenu, "Живые обои");
-            AppendMenu(menu, MF_POPUP, toolMenu, "Инструмент");
-            AppendMenu(menu, MF_POPUP, garlandMenu, "Гирлянды на окнах");
-            AppendMenu(menu, MF_POPUP, plowMenu, "Снегоуборщик");
+            AppendMenu(menu, Check(_settings.Paused), CmdPause, "Пауза" + Hotkeys.Tab(_settings, HotkeyAction.Pause));
             AppendMenu(menu, MF_POPUP, snowMenu, "Снегопад");
-            AppendMenu(menu, MF_POPUP, windMenu, "Ветер");
-            AppendMenu(menu, MF_POPUP, fpsMenu, "Плавность");
+            AppendMenu(menu, Check(_sculpt) | (_settings.Paused ? MF_GRAYED : 0), CmdSculpt, "Лепить снежки и снеговиков" + Hotkeys.Tab(_settings, HotkeyAction.Sculpt));
+            AppendMenu(menu, _settings.Paused ? MF_GRAYED : 0, CmdClear, "Убрать весь снег" + Hotkeys.Tab(_settings, HotkeyAction.Clear));
+            AppendMenu(menu, _settings.Paused ? MF_GRAYED : 0, CmdPlowNow, "Вызвать снегоуборщик" + Hotkeys.Tab(_settings, HotkeyAction.Plow));
+            AppendMenu(menu, Check(_settings.QuietOverMaximized), CmdQuiet, "Не мешать в развёрнутых окнах" + Hotkeys.Tab(_settings, HotkeyAction.Quiet));
             AppendMenu(menu, MF_SEPARATOR, 0, null);
             AppendMenu(menu, Check(Settings.Autostart), CmdAutostart, "Запускать вместе с Windows");
             AppendMenu(menu, MF_SEPARATOR, 0, null);
@@ -997,6 +959,7 @@ internal sealed class App : IDisposable
                 _settings.Save(); break;
             case CmdPlowPick: PickCustomImage(); break;
             case CmdPlowNow: CallPlowNow(); break;
+            case CmdSettings: OpenSettings(); break;
             case CmdExit: DestroyWindow(_hwnd); break;
             case CmdUpdateCheck: CheckForUpdates(manual: true); break;
             case CmdUpdateAuto: _settings.AutoUpdate = !_settings.AutoUpdate; _settings.Save(); break;
@@ -1016,6 +979,8 @@ internal sealed class App : IDisposable
         _wall.Dispose(); // repaints the user's own wallpaper
         foreach (var o in _overlays) o.Dispose();
         _overlays.Clear();
+        DetachPreview();
+        _newYear.Dispose();
         _world.Dispose();
         _gpu?.Dispose();
         _tray?.Dispose();

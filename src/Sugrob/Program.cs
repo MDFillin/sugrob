@@ -22,7 +22,14 @@ internal static class Program
         catch (AbandonedMutexException) { first = true; }
         if (!first)
         {
-            Native.MessageBox(IntPtr.Zero, "Sugrob уже запущен — ищите снежинку в трее у часов.", "Sugrob", 0x40);
+            // launched again (e.g. from the Start menu): the running copy opens its settings
+            var main = Native.FindWindow(App.MainClassName, null);
+            if (main != IntPtr.Zero)
+            {
+                Native.AllowSetForegroundWindow(-1);
+                Native.PostMessage(main, App.WM_OPEN_SETTINGS, new IntPtr(args.Contains("--fireworks") ? 1 : 0), IntPtr.Zero);
+            }
+            else Native.MessageBox(IntPtr.Zero, "Sugrob уже запущен — ищите снежинку в трее у часов.", "Sugrob", 0x40);
             return 0;
         }
 

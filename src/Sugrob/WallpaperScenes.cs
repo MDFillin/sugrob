@@ -12,7 +12,31 @@ namespace Sugrob;
 /// </summary>
 internal abstract class SceneArt : IDisposable
 {
-    public virtual void Dispose() { }
+    private readonly Dictionary<string, ID2D1PathGeometry> _cache = new();
+
+    public virtual void Dispose()
+    {
+        foreach (var g in _cache.Values) g.Dispose();
+        _cache.Clear();
+    }
+
+    /// <summary>A polygon drawn every frame: built once, then reused (no per-frame allocations).</summary>
+    protected void PolyC(string key, Color4 c, params ReadOnlySpan<Vector2> pts)
+    {
+        if (!_cache.TryGetValue(key, out var g))
+        {
+            g = _gpu.D2DFactory.CreatePathGeometry();
+            using (var sink = g.Open())
+            {
+                sink.BeginFigure(pts[0], FigureBegin.Filled);
+                for (int i = 1; i < pts.Length; i++) sink.AddLine(pts[i]);
+                sink.EndFigure(FigureEnd.Closed);
+                sink.Close();
+            }
+            _cache[key] = g;
+        }
+        _ctx.FillGeometry(g, B(c));
+    }
 
     protected float W, H, U, S;
     private ID2D1DeviceContext3 _ctx = null!;
@@ -340,7 +364,7 @@ internal sealed class CabinScene : SceneArt
              new(x1 + 2 * U, _ground + 0.5f * U));
     }
 
-    public override void Dispose() { _warm?.Dispose(); _warm = null; }
+    public override void Dispose() { _warm?.Dispose(); _warm = null; base.Dispose(); }
 
     public override void DrawDynamic(ID2D1DeviceContext3 ctx, Gpu gpu, float t)
     {
@@ -502,8 +526,8 @@ internal sealed class PorchScene : SceneArt
         Rect(a, (b + d) / 2 - 0.6f * U, c, (b + d) / 2 + 0.6f * U, bar);
         // curtains
         var cur = new Color4(0.62f, 0.1f, 0.12f, 1);
-        Poly(cur, new(a, b), new(a + 7 * U, b), new(a + 4 * U, (b + d) / 2), new(a + 6 * U, d), new(a, d));
-        Poly(cur, new(c, b), new(c - 7 * U, b), new(c - 4 * U, (b + d) / 2), new(c - 6 * U, d), new(c, d));
+        PolyC("curtainL", cur, new(a, b), new(a + 7 * U, b), new(a + 4 * U, (b + d) / 2), new(a + 6 * U, d), new(a, d));
+        PolyC("curtainR", cur, new(c, b), new(c - 7 * U, b), new(c - 4 * U, (b + d) / 2), new(c - 6 * U, d), new(c, d));
         // frost in the corners (only on the glass)
         ctx.PushAxisAlignedClip(new RawRectF(a, b, c, d), AntialiasMode.Aliased);
         Glow(_frost ??= RadGrad((0, new(1, 1, 1, 0.75f)), (1, new(1, 1, 1, 0))), a, d, 9 * U, 7 * U, 1);
@@ -517,8 +541,8 @@ internal sealed class PorchScene : SceneArt
         var cat = new Color4(0.08f, 0.05f, 0.04f, 1);
         Ell(kx, ky - 3.6f * U, 3.2f * U, 3.8f * U, cat);
         Ell(kx + 0.3f * U, ky - 8.5f * U, 2.2f * U, 2 * U, cat);
-        Poly(cat, new(kx - 1.9f * U, ky - 9.2f * U), new(kx - 1.4f * U, ky - 11.8f * U), new(kx - 0.1f * U, ky - 10.2f * U));
-        Poly(cat, new(kx + 0.7f * U, ky - 10.2f * U), new(kx + 2 * U, ky - 11.8f * U), new(kx + 2.4f * U, ky - 9.2f * U));
+        PolyC("catEarL", cat, new(kx - 1.9f * U, ky - 9.2f * U), new(kx - 1.4f * U, ky - 11.8f * U), new(kx - 0.1f * U, ky - 10.2f * U));
+        PolyC("catEarR", cat, new(kx + 0.7f * U, ky - 10.2f * U), new(kx + 2 * U, ky - 11.8f * U), new(kx + 2.4f * U, ky - 9.2f * U));
         float tail = MathF.Sin(t * 1.4f) * 1.2f * U;
         Line(kx + 2.6f * U, ky - 0.8f * U, kx + 6 * U + tail, ky - 2.2f * U, 0.9f * U, cat);
 
@@ -541,6 +565,7 @@ internal sealed class PorchScene : SceneArt
     {
         _warm?.Dispose(); _flame?.Dispose(); _frost?.Dispose();
         _warm = _flame = _frost = null;
+        base.Dispose();
     }
 
     public override void AddSprites(SpriteBuffer sb, Gpu gpu, float t)

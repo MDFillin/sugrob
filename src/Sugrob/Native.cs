@@ -45,7 +45,7 @@ internal static class Native
 
     public const uint LWA_ALPHA = 0x2;
 
-    public const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_SHIFT = 0x4, MOD_NOREPEAT = 0x4000;
+    public const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_SHIFT = 0x4, MOD_WIN = 0x8, MOD_NOREPEAT = 0x4000;
     public const uint VK_SPACE = 0x20, VK_LEFT = 0x25, VK_UP = 0x26, VK_RIGHT = 0x27, VK_DOWN = 0x28;
 
     public delegate IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
@@ -142,6 +142,9 @@ internal static class Native
 
     [DllImport("user32.dll")] public static extern IntPtr CreatePopupMenu();
     [DllImport("user32.dll")] public static extern bool DestroyMenu(IntPtr menu);
+    [DllImport("user32.dll")] public static extern bool SetMenuDefaultItem(IntPtr menu, uint item, uint byPos);
+    [DllImport("user32.dll")] public static extern short GetKeyState(int vk);
+    [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool AppendMenu(IntPtr menu, uint flags, IntPtr id, string? text);
     [DllImport("user32.dll")] public static extern int TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr hWnd, IntPtr tpm);
 
@@ -212,6 +215,13 @@ internal static class Native
     [DllImport("user32.dll")]
     public static extern uint MsgWaitForMultipleObjectsEx(uint count, IntPtr[]? handles, uint ms, uint wakeMask, uint flags);
 
+    // ---- Process of a window (app exclusions) ------------------------------------
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+    [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool QueryFullProcessImageName(IntPtr process, uint flags, char[] name, ref uint size);
+
     // ---- Window tracking ----------------------------------------------------------
     public const int GWL_STYLE = -16, GWL_EXSTYLE = -20;
     public const uint WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
@@ -274,6 +284,35 @@ internal static class Native
     public const int WTS_SESSION_LOCK = 0x7, WTS_SESSION_UNLOCK = 0x8;
     [DllImport("wtsapi32.dll")] public static extern bool WTSRegisterSessionNotification(IntPtr hWnd, int flags);
     [DllImport("wtsapi32.dll")] public static extern bool WTSUnRegisterSessionNotification(IntPtr hWnd);
+
+    // ---- Compositor clock (Windows 11): wait for the next frame DWM composes ---------
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr LoadLibrary(string name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] public static extern IntPtr GetProcAddress(IntPtr module, string name);
+
+    private unsafe static delegate* unmanaged[Stdcall]<uint, IntPtr*, uint, uint> _waitClock;
+    private static bool _clockChecked;
+
+    /// <summary>True on Windows 11+: DCompositionWaitForCompositorClock exists.</summary>
+    public static unsafe bool HasCompositorClock
+    {
+        get
+        {
+            if (!_clockChecked)
+            {
+                _clockChecked = true;
+                IntPtr dll = LoadLibrary("dcomp.dll");
+                IntPtr p = dll == IntPtr.Zero ? IntPtr.Zero : GetProcAddress(dll, "DCompositionWaitForCompositorClock");
+                _waitClock = (delegate* unmanaged[Stdcall]<uint, IntPtr*, uint, uint>)p;
+            }
+            return _waitClock != null;
+        }
+    }
+
+    /// <summary>Blocks until the compositor's next tick (vsync of the fastest monitor) or the timeout.</summary>
+    public static unsafe void WaitForCompositorClock(uint timeoutMs)
+    {
+        if (HasCompositorClock) _waitClock(0, null, timeoutMs);
+    }
 
     // ---- Monitor refresh rate --------------------------------------------------------
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

@@ -107,7 +107,7 @@ internal sealed class Gpu : IDisposable
     private readonly Dictionary<string, ID2D1PathGeometry> _geoCache = new();
 
     /// <summary>Polygon geometry built once and cached (local coordinates).</summary>
-    public ID2D1PathGeometry Polygon(string key, params Vector2[] pts)
+    public ID2D1PathGeometry Polygon(string key, params ReadOnlySpan<Vector2> pts)
     {
         if (_geoCache.TryGetValue(key, out var g)) return g;
         g = D2DFactory.CreatePathGeometry();

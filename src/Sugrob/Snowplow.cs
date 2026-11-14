@@ -202,7 +202,7 @@ internal readonly struct PlowArt
     private void E(float x, float y, float rx, float ry, Color4 c) => _ctx.FillEllipse(new Ellipse(new Vector2(x, y), rx, ry), B(c));
     private void L(float x0, float y0, float x1, float y1, float w, Color4 c) =>
         _ctx.DrawLine(new Vector2(x0, y0), new Vector2(x1, y1), B(c), w);
-    private void P(string key, Color4 c, params Vector2[] pts) => _ctx.FillGeometry(_gpu.Polygon(key, pts), B(c));
+    private void P(string key, Color4 c, params ReadOnlySpan<Vector2> pts) => _ctx.FillGeometry(_gpu.Polygon(key, pts), B(c));
 
     private void Wheel(float x, float y, float r, float dist, Color4 rim, Color4 spoke)
     {

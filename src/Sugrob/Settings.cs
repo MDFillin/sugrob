@@ -27,6 +27,12 @@ internal sealed class Settings
     public bool QuietOverMaximized { get; set; } = true;
     public FlakeShape FlakeShape { get; set; } = FlakeShape.Mixed;
     public FlakeSize FlakeSize { get; set; } = FlakeSize.Medium;
+    /// <summary>Programs (exe names, e.g. "obs64.exe") over which snow is never shown.</summary>
+    public List<string> ExcludedApps { get; set; } = new();
+    /// <summary>Hotkey overrides: action name -> "Ctrl+Alt+Shift+S" ("" = off). Missing = default.</summary>
+    public Dictionary<string, string> Hotkeys { get; set; } = new();
+    /// <summary>New Year: countdown before midnight on 31 December and fireworks at midnight.</summary>
+    public bool NewYear { get; set; } = true;
 
     public static string DataDir => Dir;
 

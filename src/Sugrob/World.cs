@@ -14,6 +14,7 @@ internal sealed class World : IDisposable
         public RECT R;
         public bool Surface;
         public bool Taskbar;
+        public bool Excluded;
     }
 
     private readonly List<Win> _z = new();                     // visible windows, top to bottom
@@ -106,6 +107,58 @@ internal sealed class World : IDisposable
         return false;
     }
 
+    // ------------------------------------------------------------- app exclusions ---
+    private readonly HashSet<string> _excluded = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<uint, string> _procCache = new();
+    private readonly char[] _pathBuf = new char[1024];
+
+    /// <summary>Programs (exe file names) over which snow is never shown and nothing piles up.</summary>
+    public void SetExcluded(IEnumerable<string> exeNames)
+    {
+        _excluded.Clear();
+        foreach (var n in exeNames)
+        {
+            var s = n.Trim();
+            if (s.Length == 0) continue;
+            if (!s.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) s += ".exe";
+            _excluded.Add(s);
+        }
+        _eventsDirty = true;
+    }
+
+    private bool IsExcluded(IntPtr h)
+    {
+        GetWindowThreadProcessId(h, out uint pid);
+        if (pid == 0) return false;
+        if (!_procCache.TryGetValue(pid, out var exe))
+        {
+            exe = "";
+            var p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (p != IntPtr.Zero)
+            {
+                uint size = (uint)_pathBuf.Length;
+                if (QueryFullProcessImageName(p, 0, _pathBuf, ref size))
+                    exe = Path.GetFileName(new string(_pathBuf, 0, (int)size));
+                CloseHandle(p);
+            }
+            _procCache[pid] = exe;
+        }
+        return exe.Length > 0 && _excluded.Contains(exe);
+    }
+
+    /// <summary>Monitor-local rects of excluded programs' windows on this monitor.</summary>
+    public void ExcludedRegion(RECT mon, List<RECT> blocked)
+    {
+        blocked.Clear();
+        foreach (var w in _z)
+        {
+            if (!w.Excluded) continue;
+            var r = w.R;
+            if (r.Right <= mon.Left || r.Left >= mon.Right || r.Bottom <= mon.Top || r.Top >= mon.Bottom) continue;
+            blocked.Add(new RECT { Left = r.Left - mon.Left, Top = r.Top - mon.Top, Right = r.Right - mon.Left, Bottom = r.Bottom - mon.Top });
+        }
+    }
+
     /// <summary>"Shovel everything": all drifts are cleared.</summary>
     public void ClearAll()
     {
@@ -131,7 +184,7 @@ internal sealed class World : IDisposable
 
         _overlays = overlays;
         _classCacheAge += dt;
-        if (_classCacheAge > 30) { _classCache.Clear(); _classCacheAge = 0; }
+        if (_classCacheAge > 30) { _classCache.Clear(); _procCache.Clear(); _classCacheAge = 0; }
 
         _z.Clear();
         EnumWindows(_enumProc, IntPtr.Zero);
@@ -207,7 +260,9 @@ internal sealed class World : IDisposable
         bool surface = taskbar ||
             (framed && (ex & WS_EX_TOOLWINDOW) == 0 && r.Width >= 120 && r.Height >= 60 && !CoversMonitor(r, style));
 
-        _z.Add(new Win { Hwnd = h, R = r, Surface = surface, Taskbar = taskbar });
+        bool excluded = _excluded.Count > 0 && !taskbar && IsExcluded(h);
+        if (excluded) surface = false;
+        _z.Add(new Win { Hwnd = h, R = r, Surface = surface, Taskbar = taskbar, Excluded = excluded });
         return true;
     }
 
